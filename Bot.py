@@ -45,32 +45,35 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, float]]:
             t = yf.Ticker(sym)
             intraday = t.history(period="1d", interval="1m")
             last_price = None
-            day_open = None
+            prev_close = None
             if not intraday.empty:
                 close_series = intraday["Close"].dropna()
                 if not close_series.empty:
                     last_price = float(close_series.iloc[-1])
-                open_series = intraday["Open"].dropna()
-                if not open_series.empty:
-                    day_open = float(open_series.iloc[0])
 
-            if last_price is None or day_open is None:
-                daily = t.history(period="5d")
-                if not daily.empty:
-                    close_series = daily["Close"].dropna()
-                    if not close_series.empty and last_price is None:
-                        last_price = float(close_series.iloc[-1])
-                    if len(close_series) > 1 and day_open is None:
-                        day_open = float(close_series.iloc[-2])
+            daily = t.history(period="5d")
+            if not daily.empty:
+                close_series = daily["Close"].dropna()
+                if not close_series.empty and last_price is None:
+                    last_price = float(close_series.iloc[-1])
+                if len(close_series) > 1:
+                    prev_close = float(close_series.iloc[-2])
+
+                # If we only have one daily close, use it for both last and prev
+                if len(close_series) == 1:
+                    close_value = float(close_series.iloc[0])
+                    if last_price is None:
+                        last_price = close_value
+                    prev_close = close_value
 
             if last_price is None:
                 continue
 
             change = None
             change_pct = None
-            if day_open is not None and day_open != 0:
-                change = last_price - day_open
-                change_pct = (change / day_open) * 100
+            if prev_close is not None and prev_close != 0:
+                change = last_price - prev_close
+                change_pct = (change / prev_close) * 100
 
             out[sym.upper()] = {
                 "price": last_price,
