@@ -38,16 +38,13 @@ def add_tickers(db: Dict[str, Dict], uid: int, symbols: List[str]) -> List[str]:
     set_user(db, uid, user)
     return user["tickers"]
 
-def _to_float(value):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, float]]:
     out = {}
     for sym in symbols:
+        sym = sym.strip().upper()
+        if not sym:
+            continue
+
         last_price = None
         prev_close = None
 
@@ -56,46 +53,31 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, float]]:
         except Exception:
             continue
 
-        # Fast path: try to obtain the latest and previous close without
-        # performing multiple download requests when available.
         try:
-            fast_info = getattr(ticker, "fast_info", None) or {}
-            last_price = _to_float(
-                fast_info.get("lastPrice") or fast_info.get("last_price")
-            )
-            prev_close = _to_float(
-                fast_info.get("previousClose") or fast_info.get("previous_close")
-            )
+            daily = ticker.history(period="10d", interval="1d")
         except Exception:
-            pass
+            daily = None
 
-        # Some tickers do not expose fast_info fields, so fall back to intraday
-        # minute data first to get the freshest trade price when possible.
-        if last_price is None:
-            try:
-                intraday = ticker.history(period="1d", interval="1m")
-            except Exception:
-                intraday = None
-            if intraday is not None and not intraday.empty:
-                close_series = intraday["Close"].dropna()
-                if not close_series.empty:
-                    last_price = _to_float(close_series.iloc[-1])
+        if daily is not None and not daily.empty:
+            closes = daily.get("Close")
+            if closes is not None:
+                closes = closes.dropna()
+                if not closes.empty:
+                    last_price = float(closes.iloc[-1])
+                    if len(closes) >= 2:
+                        prev_close = float(closes.iloc[-2])
 
-        # Use recent daily bars to retrieve both the last price and the prior
-        # close when the intraday request does not contain enough information.
-        if prev_close is None or last_price is None:
-            try:
-                daily = ticker.history(period="5d", interval="1d")
-            except Exception:
-                daily = None
-            if daily is not None and not daily.empty:
-                close_series = daily["Close"].dropna()
-                if last_price is None and not close_series.empty:
-                    last_price = _to_float(close_series.iloc[-1])
-                if len(close_series) > 1:
-                    prev_close = _to_float(close_series.iloc[-2])
-                elif len(close_series) == 1 and prev_close is None:
-                    prev_close = _to_float(close_series.iloc[0])
+        try:
+            intraday = ticker.history(period="1d", interval="1m")
+        except Exception:
+            intraday = None
+
+        if intraday is not None and not intraday.empty:
+            intraday_closes = intraday.get("Close")
+            if intraday_closes is not None:
+                intraday_closes = intraday_closes.dropna()
+                if not intraday_closes.empty:
+                    last_price = float(intraday_closes.iloc[-1])
 
         if last_price is None:
             continue
@@ -106,7 +88,7 @@ def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, float]]:
             change = last_price - prev_close
             change_pct = (change / prev_close) * 100
 
-        out[sym.upper()] = {
+        out[sym] = {
             "price": last_price,
             "change": change,
             "change_pct": change_pct,
