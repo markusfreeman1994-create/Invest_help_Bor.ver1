@@ -38,18 +38,45 @@ def add_tickers(db: Dict[str, Dict], uid: int, symbols: List[str]) -> List[str]:
     set_user(db, uid, user)
     return user["tickers"]
 
-def fetch_prices(symbols: List[str]) -> Dict[str, float]:
+def fetch_prices(symbols: List[str]) -> Dict[str, Dict[str, float]]:
     out = {}
     for sym in symbols:
         try:
             t = yf.Ticker(sym)
-            h = t.history(period="1d", interval="1m")
-            if not h.empty:
-                out[sym.upper()] = float(h["Close"].dropna().iloc[-1])
+            intraday = t.history(period="1d", interval="1m")
+            last_price = None
+            day_open = None
+            if not intraday.empty:
+                close_series = intraday["Close"].dropna()
+                if not close_series.empty:
+                    last_price = float(close_series.iloc[-1])
+                open_series = intraday["Open"].dropna()
+                if not open_series.empty:
+                    day_open = float(open_series.iloc[0])
+
+            if last_price is None or day_open is None:
+                daily = t.history(period="5d")
+                if not daily.empty:
+                    close_series = daily["Close"].dropna()
+                    if not close_series.empty and last_price is None:
+                        last_price = float(close_series.iloc[-1])
+                    if len(close_series) > 1 and day_open is None:
+                        day_open = float(close_series.iloc[-2])
+
+            if last_price is None:
                 continue
-            h = t.history(period="1d")
-            if not h.empty:
-                out[sym.upper()] = float(h["Close"].dropna().iloc[-1])
+
+            change = None
+            change_pct = None
+            if day_open is not None and day_open != 0:
+                change = last_price - day_open
+                change_pct = (change / day_open) * 100
+
+            out[sym.upper()] = {
+                "price": last_price,
+                "change": change,
+                "change_pct": change_pct,
+            }
         except Exception:
             pass
     return out
@@ -96,7 +123,18 @@ async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not prices:
         await update.message.reply_text("Не удалось получить цены. Попробуй позже.")
         return
-    lines = [f"{k}: {v:.2f}" for k, v in prices.items()]
+    lines = []
+    for k in sorted(prices):
+        data = prices[k]
+        price = data.get("price")
+        change = data.get("change")
+        change_pct = data.get("change_pct")
+        parts = [f"{k}: {price:.2f}"] if price is not None else [f"{k}: —"]
+        if change is not None and change_pct is not None:
+            parts.append(f"({change:+.2f}, {change_pct:+.2f}% за день)")
+        elif change is not None:
+            parts.append(f"({change:+.2f} за день)")
+        lines.append(" ".join(parts))
     await update.message.reply_text("📊 Цены:\n" + "\n".join(lines))
 
 def main():
