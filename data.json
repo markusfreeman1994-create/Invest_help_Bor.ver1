@@ -4,6 +4,17 @@
       "AAPL",
       "AFLT",
       "NVDA"
-    ]
+    ],
+    "base": "rub"
+  },
+  "1341546583": {
+    "tickers": [
+      "AAPL",
+      "BTC",
+      "ETH",
+      "NVDA",
+      "TON"
+    ],
+    "base": "usd"
   }
 }
