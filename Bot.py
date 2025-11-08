@@ -1147,9 +1147,13 @@ def make_chart(series: List[Tuple[datetime, float]], ticker: str, base: str) -> 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(db, update.effective_user.id)
     text = (
-        "Привет! Я бот котировок: акции через Stooq, крипта (включая TON) через CoinGecko.\n"
-        "Пользуйся кнопками ниже. Где нужен ввод — попрошу в чате.\n\n"
-        "Команды тоже работают: /price /add /remove /chart /setbase /convert."
+        "Привет! Я помогу быстро смотреть цены, строить графики и конвертировать валюты.\n\n"
+        "Что умею:\n"
+        "• 📊 Цены — показать ваши тикеры\n"
+        "• 📈 График — отправь `TICKER 7d|30d|90d|1y`\n"
+        "• 🔁 Конвертер — выбери валюты и сумму\n"
+        "• 💱 Валюта — USD / EUR / RUB\n\n"
+        "Используй кнопки ниже или команды: /add /remove /list /price /chart /convert /setbase"
     )
     if update.message:
         await update.message.reply_text(text, reply_markup=main_menu_markup(user))
