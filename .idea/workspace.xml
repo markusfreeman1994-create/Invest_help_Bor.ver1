@@ -5,7 +5,24 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="ff6a6d3b-a9ca-4e96-ad2b-efbc193af1b4" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.env" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/bot/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/bot/charts.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/bot/config.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/bot/logic.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/bot/run.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/bot/storage.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/bot/ui.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/bot/utils_http.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/handlers/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/handlers/callbacks.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/handlers/commands.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/handlers/messages.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/providers/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/providers/coingecko.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/providers/fx.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/providers/stooq.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/providers/tonapi.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/Bot.py" beforeDir="false" afterPath="$PROJECT_DIR$/Bot.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/data.json" beforeDir="false" afterPath="$PROJECT_DIR$/data.json" afterDir="false" />
     </list>
@@ -32,6 +49,11 @@
     &quot;last_opened_file_path&quot;: &quot;/Users/vladimir/Documents/Work/GitProject/Invest_help_Bor.ver1&quot;
   }
 }</component>
+  <component name="RecentsManager">
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/handlers" />
+    </key>
+  </component>
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
     <task active="true" id="Default" summary="Default task">

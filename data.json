@@ -15,6 +15,12 @@
       "NVDA",
       "TON"
     ],
-    "base": "usd"
+    "base": "rub"
+  },
+  "1671272207": {
+    "tickers": [
+      "BTC"
+    ],
+    "base": "eur"
   }
 }
