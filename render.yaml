@@ -3,18 +3,17 @@ services:
     name: invest-help-bot
     env: python
     plan: free
-    pythonVersion: 3.11.9
-    autoDeploy: true
     buildCommand: |
-      python -m pip install --upgrade pip
+      pip install --upgrade pip
       pip install -r requirements.txt
     startCommand: python Bot.py
+    autoDeploy: true
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: BOT_TOKEN
-        sync: false        # секрет зададим в панели Render
       - key: DEFAULT_BASE
         value: usd
+      - key: BOT_TOKEN
+        sync: false
       - key: COINGECKO_API_KEY
-        sync: false        # опционально (если есть ключ)
+        sync: false
