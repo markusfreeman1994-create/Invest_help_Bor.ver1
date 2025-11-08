@@ -13,13 +13,16 @@
       "BTC",
       "ETH",
       "NVDA",
+      "SBER",
       "TON"
     ],
     "base": "rub"
   },
   "1671272207": {
     "tickers": [
-      "BTC"
+      "AAPL",
+      "BTC",
+      "SBER"
     ],
     "base": "eur"
   }
