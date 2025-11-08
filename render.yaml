@@ -1,0 +1,14 @@
+services:
+  - type: worker
+    name: invest-help-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python Bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DEFAULT_BASE
+        value: usd
+      - key: COINGECKO_API_KEY
+        sync: false

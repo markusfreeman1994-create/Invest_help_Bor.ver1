@@ -27,5 +27,15 @@
       "SBER"
     ],
     "base": "eur"
+  },
+  "6007133132": {
+    "tickers": [
+      "AAPL",
+      "BTC",
+      "SBER",
+      "TSLA",
+      "YDEX"
+    ],
+    "base": "usd"
   }
 }
