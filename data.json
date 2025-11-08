@@ -14,9 +14,11 @@
       "ETH",
       "NVDA",
       "SBER",
-      "TON"
+      "TON",
+      "TSLA",
+      "YDEX"
     ],
-    "base": "rub"
+    "base": "usd"
   },
   "1671272207": {
     "tickers": [

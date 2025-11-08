@@ -9,6 +9,8 @@ import json
 import asyncio
 import logging
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
@@ -56,6 +58,14 @@ logger = logging.getLogger("invest_bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+# Reusable HTTP session with connection pooling
+_SESSION = requests.Session()
+_SESSION.mount("http://", HTTPAdapter(pool_connections=20, pool_maxsize=50, max_retries=0))
+_SESSION.mount("https://", HTTPAdapter(pool_connections=20, pool_maxsize=50, max_retries=0))
+
+# Thread pool for parallel I/O
+_IO_POOL = ThreadPoolExecutor(max_workers=int(os.getenv("IO_POOL", "12")))
+
 # ========== HTTP utils ==========
 _DEFAULT_HEADERS = {
     "Accept": "application/json",
@@ -76,7 +86,7 @@ def http_get_json(
         hdr.update(headers)
     for attempt in range(retries + 1):
         try:
-            r = requests.get(url, params=params, headers=hdr, timeout=timeout)
+            r = _SESSION.get(url, params=params, headers=hdr, timeout=timeout)
             if r.status_code == 429:
                 try:
                     ra = float(r.headers.get("Retry-After", "") or 0)
@@ -97,6 +107,9 @@ def http_get_json(
 # ========== FX provider (with cache & fallbacks) ==========
 _FX_CACHE: Dict[str, Tuple[float, float]] = {}  # key -> (rate, ts)
 _FX_TTL = 3600.0
+# Short-lived cache for aggregated prices per (tuple(sorted(symbols)), base)
+_PRICE_CACHE: Dict[Tuple[Tuple[str, ...], str], Tuple[float, Dict[str, Dict[str, float]]]] = {}
+_PRICE_TTL = float(os.getenv("PRICE_TTL", "5.0"))  # seconds
 
 def _fx_cache_get(frm: str, to: str) -> Optional[float]:
     row = _FX_CACHE.get(f"{frm}->{to}")
@@ -191,6 +204,27 @@ def _csv_open(row: str):
             return None
     return None
 
+# Parallelized Stooq fetches
+def _fetch_stooq_one(sym: str, usd_to_vs: float) -> Optional[Tuple[str, Dict[str, float]]]:
+    try:
+        stooq_sym = f"{sym.replace('-', '.').lower()}.us"
+        url = "https://stooq.com/q/d/l/"
+        params = {"s": stooq_sym, "i": "d"}
+        r = _SESSION.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        lines = (r.text or "").strip().splitlines()
+        if len(lines) < 2:
+            return None
+        last_close = _csv_close(lines[-1])
+        prev_close = _csv_close(lines[-2]) if len(lines) >= 3 else _csv_open(lines[-1])
+        if not isinstance(last_close, (int, float)) or not isinstance(prev_close, (int, float)) or prev_close == 0:
+            return None
+        price_vs = float(last_close) * float(usd_to_vs)
+        chg = (last_close - prev_close) / prev_close
+        return sym.upper(), {"price": price_vs, "chg": chg}
+    except Exception:
+        return None
+
 def fetch_stock_prices(symbols: List[str], vs: str) -> Dict[str, Dict[str, float]]:
     out: Dict[str, Dict[str, float]] = {}
     if not symbols:
@@ -199,26 +233,16 @@ def fetch_stock_prices(symbols: List[str], vs: str) -> Dict[str, Dict[str, float
     if not isinstance(rate, (int, float)) or rate <= 0:
         logger.warning("FX rate unavailable for USD -> %s", vs)
         return out
+    futures = []
+    # Limit per-batch workers to avoid hammering the source
+    max_workers = min(len(symbols), 8)
     for sym in symbols:
-        try:
-            stooq_sym = f"{sym.replace('-', '.').lower()}.us"
-            url = "https://stooq.com/q/d/l/"
-            params = {"s": stooq_sym, "i": "d"}
-            r = requests.get(url, params=params, timeout=10)
-            r.raise_for_status()
-            lines = (r.text or "").strip().splitlines()
-            if len(lines) < 2:
-                continue
-            last_close = _csv_close(lines[-1])
-            prev_close = _csv_close(lines[-2]) if len(lines) >= 3 else _csv_open(lines[-1])
-            if not isinstance(last_close, (int, float)) or not isinstance(prev_close, (int, float)) or prev_close == 0:
-                continue
-            price_vs = float(last_close) * float(rate)
-            chg = (last_close - prev_close) / prev_close
-            out[sym.upper()] = {"price": price_vs, "chg": chg}
-        except Exception as e:
-            logger.warning("Stooq fetch failed for %s: %s", sym, e)
-            continue
+        futures.append(_IO_POOL.submit(_fetch_stooq_one, sym, rate))
+    for fut in as_completed(futures):
+        res = fut.result()
+        if res:
+            k, v = res
+            out[k] = v
     return out
 
 def stooq_history(symbol: str, days: int) -> List[Tuple[datetime, float]]:
@@ -337,38 +361,45 @@ def _moex_candles(secid: str, days: int) -> List[Tuple[datetime, float]]:
         logger.warning("MOEX candles failed for %s: %s", secid, e)
         return []
 
+# Parallelized MOEX per-ticker computation
+def _moex_last_two(secid: str) -> Optional[Tuple[float, float]]:
+    series = _moex_candles(secid, 10)
+    if len(series) < 2:
+        return None
+    prev_close = series[-2][1]
+    last_close = series[-1][1]
+    if not isinstance(prev_close, (int, float)) or not isinstance(last_close, (int, float)) or prev_close == 0:
+        return None
+    return float(prev_close), float(last_close)
+
 def fetch_moex_prices(symbols: List[str], vs: str) -> Dict[str, Dict[str, float]]:
     """
     Return last close and daily % change computed from candles for RU tickers.
     Price is converted from RUB to 'vs' (USD/EUR/RUB).
     """
     vs_u = (vs or "RUB").upper()
-    # Preload FX once
-    if vs_u == "RUB":
-        rub_rate = 1.0
-    else:
-        rub_rate = fx_rate("RUB", vs_u) or 0.0
+    rub_rate = 1.0 if vs_u == "RUB" else (fx_rate("RUB", vs_u) or 0.0)
     out: Dict[str, Dict[str, float]] = {}
-    for sym in symbols or []:
+    if not symbols:
+        return out
+    futures = []
+    for sym in symbols:
         secid = _moex_secid(sym)
-        series = _moex_candles(secid, 10)  # a few days to be safe
-        if len(series) < 2:
+        futures.append(_IO_POOL.submit(_moex_last_two, secid))
+    for sym, fut in zip(symbols, futures):
+        res = fut.result()
+        if not res:
             continue
-        prev_close = series[-2][1]
-        last_close = series[-1][1]
-        if not isinstance(prev_close, (int, float)) or not isinstance(last_close, (int, float)) or prev_close == 0:
-            continue
-        price_rub = float(last_close)
+        prev_close, last_close = res
         chg = (last_close - prev_close) / prev_close
         if rub_rate == 0 and vs_u != "RUB":
-            # try on-demand fetch if earlier failed
             rate_try = fx_rate("RUB", vs_u)
             if not isinstance(rate_try, (int, float)) or rate_try <= 0:
                 logger.warning("MOEX: FX RUB->%s unavailable for %s", vs_u, sym)
                 continue
             rub_rate = rate_try
-        price_vs = price_rub if vs_u == "RUB" else price_rub * rub_rate
-        out[sym.upper()] = {"price": price_vs, "chg": chg}
+        price_vs = last_close if vs_u == "RUB" else last_close * rub_rate
+        out[sym.upper()] = {"price": float(price_vs), "chg": float(chg)}
     return out
 
 def moex_history(symbol: str, base: str, days: int) -> List[Tuple[datetime, float]]:
@@ -583,16 +614,22 @@ def ton_price_direct(vs_l: str) -> Optional[Dict[str, float]]:
     Прямая цена TON с бирж (USDT) с 24h %, без CoinGecko.
     Возвращает словарь формата {"price": <в базовой валюте>, "chg": <доля>} или None.
     """
-    for fn in (_ton_from_binance, _ton_from_okx, _ton_from_kucoin):
-        res = fn()
+    def _wrap(fn):
+        try:
+            return fn()
+        except Exception:
+            return None
+    futures = [_IO_POOL.submit(_wrap, fn) for fn in (_ton_from_binance, _ton_from_okx, _ton_from_kucoin)]
+    for fut in as_completed(futures):
+        res = fut.result()
         if res:
-            last_usd, chg = res  # USDT ~ USD
+            last_usd, chg = res
             if vs_l == "usd":
                 price = last_usd
             else:
                 rate = fx_rate("USD", (vs_l or "usd").upper())
                 if not isinstance(rate, (int, float)) or rate <= 0:
-                    return None
+                    continue
                 price = last_usd * rate
             return {"price": float(price), "chg": chg}
     return None
@@ -706,11 +743,18 @@ def ton_history_direct(vs_l: str, days: int) -> List[Tuple[datetime, float]]:
     return [(dt, v * rate) for dt, v in series_usd]
 
 # ========== UI helpers ==========
+def ccy_symbol(code: str) -> str:
+    c = (code or "").upper()
+    return {"USD": "$", "EUR": "€", "RUB": "₽"}.get(c, c)
+
 def format_amount(x: float, decimals: int = 2) -> str:
     try:
         return f"{x:,.{decimals}f}".replace(",", " ")
     except Exception:
         return str(x)
+
+def fmt_with_symbol(amount: float, code: str, decimals: int = 2) -> str:
+    return f"{ccy_symbol(code)}{format_amount(amount, decimals)}"
 
 def main_menu_markup(user: Dict) -> InlineKeyboardMarkup:
     base = (user.get("base") or DEFAULT_BASE).upper()
@@ -720,7 +764,7 @@ def main_menu_markup(user: Dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("➕ Добавить", callback_data="ACT:ADD"),
          InlineKeyboardButton("➖ Удалить", callback_data="ACT:REMOVE")],
         [InlineKeyboardButton("📈 График", callback_data="ACT:CHART"),
-         InlineKeyboardButton(f"💱 Валюта: {base}", callback_data="ACT:BASE")],
+         InlineKeyboardButton(f"💱 Валюта: {ccy_symbol(base)}", callback_data="ACT:BASE")],
         [InlineKeyboardButton("🔁 Конвертер", callback_data="ACT:CONVERT")],
     ]
     if (user.get("tickers") or []):
@@ -758,6 +802,13 @@ def convert_to_markup(from_ccy: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(label("RUB"), callback_data="CONV:TO:RUB"),
     ], [InlineKeyboardButton("◀️ Назад", callback_data="ACT:BACK")]]
     return InlineKeyboardMarkup(rows)
+
+def convert_continue_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Продолжить", callback_data="CONV:AGAIN")],
+        [InlineKeyboardButton("♻️ Сменить валюты", callback_data="ACT:CONVERT")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="ACT:BACK")],
+    ])
 
 # ========== Converter helpers ==========
 _CCY_ALIASES = {
@@ -984,6 +1035,12 @@ async def fetch_prices(symbols: List[str], vs: str) -> Dict[str, Dict[str, float
         return {}
     vs_l = (vs or "usd").lower()
     vs_u = vs_l.upper()
+    # Short-lived aggregation cache (avoid repeated identical requests for a few seconds)
+    cache_key = (tuple(sorted(symbols_norm)), vs_l)
+    cached = _PRICE_CACHE.get(cache_key)
+    now = time.time()
+    if cached and (now - cached[0]) < _PRICE_TTL:
+        return dict(cached[1])
     result: Dict[str, Dict[str, float]] = {}
     crypto = [s for s in symbols_norm if is_crypto_symbol(s)]
     equity = [s for s in symbols_norm if s not in crypto]
@@ -1025,6 +1082,7 @@ async def fetch_prices(symbols: List[str], vs: str) -> Dict[str, Dict[str, float
                     result.update(stq)
             except Exception as e:
                 logger.error("Error fetching US stock prices (Stooq): %s", e)
+    _PRICE_CACHE[cache_key] = (time.time(), dict(result))
     return result
 
 # ========== Charts ==========
@@ -1077,7 +1135,7 @@ def make_chart(series: List[Tuple[datetime, float]], ticker: str, base: str) -> 
     dates = [d for d,_ in series]; values = [v for _,v in series]
     fig, ax = plt.subplots(figsize=(6,3))
     ax.plot(dates, values, linewidth=2)
-    ax.set_title(f"{ticker} in {base.upper()}"); ax.set_xlabel("Date"); ax.set_ylabel(base.upper())
+    ax.set_title(f"{ticker} in {ccy_symbol(base)}"); ax.set_xlabel("Date"); ax.set_ylabel(ccy_symbol(base))
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(ax.xaxis.get_major_locator()))
@@ -1144,8 +1202,8 @@ async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
         chg = p.get("chg")
         chg_txt = f" ({chg:+.2%})" if isinstance(chg, (int, float)) else ""
-        price_txt = format_amount(p["price"], 2)
-        lines.append(f"{k}: {price_txt} {base.upper()}{chg_txt}")
+        price_txt = fmt_with_symbol(p["price"], base, 2)
+        lines.append(f"{k}: {price_txt}{chg_txt}")
     await update.message.reply_text("📊 Котировки:\n" + ("\n".join(lines) if lines else "Нет данных."))
 
 async def setbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1179,6 +1237,13 @@ async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Не удалось построить график.")
         return
     await update.message.reply_photo(photo=png, caption=f"{ticker} · {period_days}d")
+    # включим постоянный режим графиков
+    context.user_data["mode"] = "chart"
+    await update.message.reply_text(
+        "Ещё график? Напишите `TICKER [7d|30d|90d|1y]` или нажмите Назад.",
+        parse_mode="Markdown",
+        reply_markup=cancel_markup(),
+    )
 
 async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -1206,9 +1271,10 @@ async def convert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Не удалось получить курс. Попробуй позже.")
         return
     converted, rate = res
+    frm_s, to_s = ccy_symbol(frm), ccy_symbol(to)
     msg = (
-        f"{format_amount(amount, 2)} {frm} ≈ {format_amount(converted, 2)} {to}\n"
-        f"Курс: 1 {frm} = {format_amount(rate, 4)} {to}"
+        f"{format_amount(amount, 2)} {frm_s} ≈ {format_amount(converted, 2)} {to_s}\n"
+        f"Курс: 1 {frm_s} = {format_amount(rate, 4)} {to_s}"
     )
     await update.message.reply_text(msg)
 
@@ -1221,6 +1287,10 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(db, uid)
 
     if data == "ACT:BACK":
+        # Exit any active tool modes
+        context.user_data.pop("mode", None)
+        context.user_data.pop("conv_from", None)
+        context.user_data.pop("conv_to", None)
         await q.edit_message_reply_markup(reply_markup=main_menu_markup(user))
         return
     if data == "ACT:LIST":
@@ -1245,8 +1315,8 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             chg = p.get("chg")
             chg_txt = f" ({chg:+.2%})" if isinstance(chg, (int, float)) else ""
-            price_txt = format_amount(p["price"], 2)
-            lines.append(f"{k}: {price_txt} {(base or 'usd').upper()}{chg_txt}")
+            price_txt = fmt_with_symbol(p["price"], base, 2)
+            lines.append(f"{k}: {price_txt}{chg_txt}")
         await q.message.reply_text("📊 Котировки:\n" + ("\n".join(lines) if lines else "Нет данных."), reply_markup=main_menu_markup(user))
         return
     if data == "ACT:ADD":
@@ -1321,6 +1391,20 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data == "CONV:AGAIN":
+        frm = context.user_data.get("conv_from")
+        to = context.user_data.get("conv_to")
+        if not frm or not to:
+            await q.message.reply_text("Сначала выберите валюты ИЗ/В:", reply_markup=convert_from_markup())
+            return
+        context.user_data["mode"] = "convert_amount"
+        await q.message.reply_text(
+            f"Сколько конвертируем из {frm} в {to}?\nВведите число, например: `100.5`",
+            parse_mode="Markdown",
+            reply_markup=cancel_markup(),
+        )
+        return
+
 # ========== Text handler ==========
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -1361,11 +1445,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не удалось получить историю для графика.", reply_markup=main_menu_markup(user))
             return
         png = make_chart(series, ticker, base)
-        context.user_data.pop("mode", None)
         if not png:
             await update.message.reply_text("Не удалось построить график.", reply_markup=main_menu_markup(user))
             return
-        await update.message.reply_photo(photo=png, caption=f"{ticker} · {period_days}d", reply_markup=main_menu_markup(user))
+        # остаёмся в режиме графика — можно вводить следующий тикер и период
+        await update.message.reply_photo(photo=png, caption=f"{ticker} · {period_days}d")
+        await update.message.reply_text(
+            "Ещё график? Напишите `TICKER [7d|30d|90d|1y]` или нажмите Назад.",
+            parse_mode="Markdown",
+            reply_markup=cancel_markup(),
+        )
         return
 
     if mode == "convert":
@@ -1388,10 +1477,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не удалось получить курс. Попробуй позже.", reply_markup=cancel_markup())
             return
         converted, rate = res
+        frm_s, to_s = ccy_symbol(frm), ccy_symbol(to)
         context.user_data.pop("mode", None)
         await update.message.reply_text(
-            f"{format_amount(amount, 2)} {frm} ≈ {format_amount(converted, 2)} {to}\n"
-            f"Курс: 1 {frm} = {format_amount(rate, 4)} {to}",
+            f"{format_amount(amount, 2)} {frm_s} ≈ {format_amount(converted, 2)} {to_s}\n"
+            f"Курс: 1 {frm_s} = {format_amount(rate, 4)} {to_s}",
             reply_markup=main_menu_markup(get_user(db, uid)),
         )
         return
@@ -1412,13 +1502,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не удалось получить курс. Попробуй позже.", reply_markup=cancel_markup())
             return
         converted, rate = res
-        context.user_data.pop("mode", None)
-        context.user_data.pop("conv_from", None)
-        context.user_data.pop("conv_to", None)
+        # остаёмся в режиме конвертера с выбранными валютами
         await update.message.reply_text(
             f"{format_amount(amt, 2)} {frm} ≈ {format_amount(converted, 2)} {to}\n"
             f"Курс: 1 {frm} = {format_amount(rate, 4)} {to}",
-            reply_markup=main_menu_markup(get_user(db, uid)),
+            reply_markup=convert_continue_markup(),
         )
         return
 
