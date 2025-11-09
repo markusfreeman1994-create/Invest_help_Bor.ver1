@@ -1523,6 +1523,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main():
     if not BOT_TOKEN:
         raise SystemExit("Нет BOT_TOKEN в .env")
+
     app = Application.builder().token(BOT_TOKEN).build()
     try:
         asyncio.get_event_loop()
@@ -1530,6 +1531,7 @@ def main():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+    # хэндлеры (как у тебя уже есть)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_cmd))
     app.add_handler(CommandHandler("remove", remove_cmd))
@@ -1538,12 +1540,33 @@ def main():
     app.add_handler(CommandHandler("price", price_cmd))
     app.add_handler(CommandHandler("chart", chart_cmd))
     app.add_handler(CommandHandler("convert", convert_cmd))
-
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(error_handler)
 
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    mode = (os.getenv("MODE", "polling") or "polling").lower()
+    if mode == "webhook":
+        # Для Koyeb/любого PaaS с HTTPS
+        port = int(os.getenv("PORT", "8080"))
+        base = os.getenv("WEBHOOK_BASE", "").strip()
+        if not base.startswith("https://"):
+            raise SystemExit(
+                "Для webhook установи переменную окружения WEBHOOK_BASE, "
+                "например: https://<app>.koyeb.app"
+            )
+        url_path = f"/bot{BOT_TOKEN}"  # уникальный путь
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=url_path,
+            webhook_url=base.rstrip("/") + url_path,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+    else:
+        # локально можно продолжать запускать через polling
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
