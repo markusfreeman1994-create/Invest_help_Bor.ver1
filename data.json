@@ -12,13 +12,11 @@
       "AAPL",
       "BTC",
       "ETH",
-      "NVDA",
-      "SBER",
       "TON",
       "TSLA",
       "YDEX"
     ],
-    "base": "usd"
+    "base": "rub"
   },
   "1671272207": {
     "tickers": [
