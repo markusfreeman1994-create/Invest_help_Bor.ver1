@@ -1,0 +1,5 @@
+python-telegram-bot[webhooks]==21.6
+requests>=2.31.0
+matplotlib>=3.8.0
+python-dotenv>=1.0.1
+ujson>=5.10.0
